@@ -86,7 +86,12 @@ float m_fSlideDirection = 0.0f;
 char *strSlideSoundName = "Carpet.Scrape";
 
 // Slope sliding
+#define SLOPE_SLIDE_MAX_SPEED 700.0f
+#define SLOPE_SLIDE_JUMP_TIME_CUTOFF 150.0f
+#define SLOPE_MIN_ANGLE_DEG 30.0f
 bool bSlopeSliding = false;
+bool bHasJumpedOffSlope = false;
+float m_fSlopeSlideJumpTimeout = 0.0f;
 
 // Bouncing
 #define BOUNCE_ANGLE_SCALE 0.8f
@@ -1234,6 +1239,14 @@ void CGameMovement::ReduceTimers( void )
 			m_fTurnTimeout = 0;
 		}
 	}
+	if (m_fSlopeSlideJumpTimeout > 0)
+	{
+		m_fSlopeSlideJumpTimeout -= frame_msec;
+		if (m_fSlopeSlideJumpTimeout < 0)
+		{
+			m_fSlopeSlideJumpTimeout = 0;
+		}
+	}
 }
 
 //-----------------------------------------------------------------------------
@@ -1984,6 +1997,7 @@ void CGameMovement::AirMove( void )
 	Vector		wishdir;
 	float		wishspeed;
 	Vector		forward, right, up;
+	bool		bSlopeTraced = false;
 
 	// Setup trace end position
 	Vector vecEndPos = player->GetAbsOrigin();
@@ -1997,8 +2011,61 @@ void CGameMovement::AirMove( void )
 		COLLISION_GROUP_PLAYER_MOVEMENT,
 		tr_bottom);
 
+	// Trace a unit in all 4 directions from bottom entity endpos
+	if (tr_bottom.DidHit())
+	{
+		trace_t tr_bottom_roundtrace;
+		for (int xDir = -1; xDir <= 1 && !bSlopeTraced; xDir += 2)
+		{
+			for (int yDir = -1; yDir <= 1 && !bSlopeTraced; yDir += 2)
+			{
+				UTIL_TraceLine(tr_bottom.endpos, *(new Vector(
+					tr_bottom.endpos.x + (ceilf(player->GetAbsAngles().x) * xDir),
+					tr_bottom.endpos.y + (ceilf(player->GetAbsAngles().y) * yDir),
+					tr_bottom.endpos.z
+					)), MASK_ALL, player, COLLISION_GROUP_PLAYER_MOVEMENT, &tr_bottom_roundtrace);
+
+				// If there is anything found around - it's considered a slope
+				if (tr_bottom_roundtrace.DidHit())
+				{
+					bSlopeTraced = true;
+				}
+			}
+		}
+	}
+
+	bool bOldSlopeSliding = bSlopeSliding;
+
+	// If a sufrace is one unit under us and we're falling - we're sliding off a slope
+	bSlopeSliding = tr_bottom.DidHit() && tr_bottom.startpos.DistTo(tr_bottom.endpos) < 1 && player->GetAbsVelocity().z < 0;
+
+	if (bSlopeSliding)
+	{
+		// Start jump timeout if only just started sliding
+		if (!bOldSlopeSliding)
+		{
+			m_fSlopeSlideJumpTimeout = SLOPE_SLIDE_JUMP_TIME_CUTOFF;
+		}
+
+		// Clamp player slope slide speed to set amount
+		if (player->GetAbsVelocity().Length() > SLOPE_SLIDE_MAX_SPEED)
+		{
+			float frac = SLOPE_SLIDE_MAX_SPEED / player->GetAbsVelocity().Length();
+			mv->m_vecVelocity[0] *= frac;
+			mv->m_vecVelocity[1] *= frac;
+		}
+
+		// Allow jumping off of slopes if timeout is clear
+		if (mv->m_nButtons & IN_JUMP && m_fSlopeSlideJumpTimeout == 0)
+		{
+			mv->m_vecVelocity[2] = 0;
+			Jump(physprops->GetSurfaceData(tr_bottom.surface.surfaceProps));
+			bHasJumpedOffSlope = true;
+		}
+	}
+
 	// Do we meet the requirements to bounce?
-	if (!bHasBounced && (m_flJumpTime < (GAMEMOVEMENT_JUMP_TIME * 0.9)) && !bIsCapped)
+	else if (!bHasBounced && (m_flJumpTime < (GAMEMOVEMENT_JUMP_TIME * 0.9)) && !bIsCapped && !bSlopeTraced)
 	{
 		// Vault
 		if (!bHasVaulted &&							// haven't vaulted yet
@@ -2140,24 +2207,12 @@ void CGameMovement::AirMove( void )
 		}
 	}
 
-	// If a sufrace is one unit under us and we're falling - we're sliding off a slope
-	bSlopeSliding = tr_bottom.startpos.DistTo(tr_bottom.endpos) < 1 && player->GetAbsVelocity().z < 0;
-
-	if (bSlopeSliding)
-	{
-		if (mv->m_nButtons & IN_JUMP)
-		{
-			mv->m_vecVelocity[2] = 0;
-			Jump(physprops->GetSurfaceData(tr_bottom.surface.surfaceProps));
-		}
-	}
-
 	IronSightsSlowMo();
 	Lean();
 	CheckTurnAround();
 
 	// Do not air accelerate mid-turnaround or mid-slopeslide
-	if (!m_fTurnTime && !bSlopeSliding)
+	if (!m_fTurnTime && !bSlopeSliding && !bHasJumpedOffSlope)
 	{
 		AngleVectors(mv->m_vecViewAngles, &forward, &right, &up);  // Determine movement angles
 
@@ -2418,9 +2473,11 @@ void CGameMovement::WalkMove( void )
 		player->ViewPunch(QAngle(yoffset, xoffset, 0));
 	}
 
-	// On ground, therefore reset bounce
+	// On ground, therefore reset bounces and slope slides
 	bHasBounced = false;
 	bHasVaulted = false;
+	bSlopeSliding = false;
+	bHasJumpedOffSlope = false;
 	m_fPreviousTurn = 0;
 
 	CBaseCombatWeapon *pWeapon = player->GetActiveWeapon();
@@ -4403,13 +4460,15 @@ void CGameMovement::CategorizePosition( void )
 		// Try and move down.
 		TryTouchGround( bumpOrigin, point, GetPlayerMins(), GetPlayerMaxs(), MASK_PLAYERSOLID, COLLISION_GROUP_PLAYER_MOVEMENT, pm );
 		
+		float flSteepnessCutoff = (floorf(sin(DEG2RAD(90.0f - SLOPE_MIN_ANGLE_DEG)) * 100) / 100);
+
 		// Was on ground, but now suddenly am not.  If we hit a steep plane, we are not on ground
-		if ( !pm.m_pEnt || pm.plane.normal[2] < 0.7 )
+		if (!pm.m_pEnt || pm.plane.normal[2] < flSteepnessCutoff)
 		{
 			// Test four sub-boxes, to see if any of them would have found shallower slope we could actually stand on
 			TryTouchGroundInQuadrants( bumpOrigin, point, MASK_PLAYERSOLID, COLLISION_GROUP_PLAYER_MOVEMENT, pm );
 
-			if ( !pm.m_pEnt || pm.plane.normal[2] < 0.7 )
+			if (!pm.m_pEnt || pm.plane.normal[2] < flSteepnessCutoff)
 			{
 				SetGroundEntity( NULL );
 				// probably want to add a check for a +z velocity too!
