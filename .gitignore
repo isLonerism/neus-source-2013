@@ -36,6 +36,8 @@ client.lib
 server.pdb
 server.dll
 server.lib
+game_shader_dx*.dll
+game_shader_dx*.lib
 
 client.so
 client.so.dbg
@@ -54,6 +56,10 @@ config.cfg
 
 # shader files
 *.tmp
+*.inc
+*.vcs
+sp/src/materialsystem/stdshaders/*.txt
+sp/src/materialsystem/stdshaders/makefile*
 
 # map files
 *.bsp
