@@ -1,0 +1,63 @@
+// ------------------------------------------------------------
+// DOF_PS2X.FXC
+//
+// This file implements a basic dynamic Depth of Field effect.
+// Made for Neus.
+// ------------------------------------------------------------
+
+#include "common_ps_fxc.h"
+
+// ------------------------------------------------------------
+// Pixel shader registers.
+// ------------------------------------------------------------
+
+// Frame buffer texture sampler
+sampler BaseTextureSampler : register( s0 ); 
+
+// Depth buffer texture sampler
+sampler DepthBufferTextureSampler : register( s1 );
+
+// Texel width and height
+const float texelWidth : register( c0 );
+const float texelHeight : register( c1 );
+
+// ------------------------------------------------------------
+// Shader inputs struct.
+// ------------------------------------------------------------
+struct PS_INPUT
+{
+	float2 pixelCoordinates	: TEXCOORD0;
+};
+
+float4 main( PS_INPUT IN ) : COLOR
+{
+	// Take the color and depth values for current pixel
+	float4 cColor = tex2D(BaseTextureSampler, IN.pixelCoordinates);
+	float4 cDepth = tex2D(DepthBufferTextureSampler, IN.pixelCoordinates);
+
+	// Depth of center pixel
+	float4 cCenterDepth = tex2D(DepthBufferTextureSampler, float2(0.5, 0.5));
+
+	// Blur conditions
+	if (cCenterDepth.a < 1 &&   // looking close enough at something in front of us
+        cDepth.a == 1)          // the current pixel is far away
+	{
+        // Reset current pixel
+        cColor = float4(0, 0, 0, 1);
+
+        // 3x3 pixel kernel
+        for (int y = -1; y <= 1; y++)
+        {
+            for (int x = -1; x <= 1; x++)
+            {
+                // Add each pixel in the kernel to current pixel color
+                cColor += tex2D(BaseTextureSampler, IN.pixelCoordinates + float2(texelWidth * x, texelHeight * y));
+            }
+        }
+
+        // Average out the colors
+        cColor /= 9;
+	}
+
+	return cColor;
+}
